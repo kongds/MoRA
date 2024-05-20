@@ -2,7 +2,7 @@
 
 ## Setup
 
-We implement MoRA in peft-mora based on HF peft in [apply]: http://github.com/github/kongds/MoRA/peft-mora/src/peft/tuners/lora/layer.py#L225 and [merge]: http://github.com/github/kongds/MoRA/peft-mora/src/peft/tuners/lora/layer.py#L521.
+We implement MoRA in peft-mora based on HF peft in the [`apply_mora`](https://github.com/kongds/MoRA/blob/main/peft-mora/src/peft/tuners/lora/layer.py#L225) and [`get_delta_weight`](https://github.com/kongds/MoRA/blob/main/peft-mora/src/peft/tuners/lora/layer.py#L510).
 ``` sh
 pip install -e ./peft-mora
 ```
