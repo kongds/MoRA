@@ -33,12 +33,13 @@ model = model.merge_and_unload() # can be merged into model via `merge_and_unloa
 ``` sh
 RANK=8
 deepspeed --num_gpus=8 --num_nodes=2 train.py \
-           --base_model <LLAMA-2> --micro_batch_size 1\
+           --base_model <LLAMA-2> --micro_batch_size 4\
             --wandb_run_name mora_math_r8 --lora_target_modules q_proj,k_proj,v_proj,o_proj,gate_proj,down_proj,up_proj \
             --num_epochs 3 --deepspeed ds.config --wandb_project lora-math --lora_r $RANK --batch_size 128 \
             --data_path meta-math/MetaMath \
+            --save_steps 3000 \
             --learning_rate 3e-4 --mora_type 6 \
-            --logging_steps 5  --use_16bit --use_mora 
+            --logging_steps 5  --use_bf16  --use_16bit --use_mora 
 ```
 
 ### pretraining

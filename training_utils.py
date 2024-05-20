@@ -1,7 +1,9 @@
 import os
+import copy
 import json
 import math
 from functools import partial
+from typing import Optional, Dict, Sequence
 
 import torch
 import torch.distributed as dist
@@ -11,50 +13,13 @@ from torch.distributed.fsdp import (
     FullyShardedDataParallel as FSDP,
     MixedPrecision,
 )
-from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
+from transformers.trainer_utils import has_length
 
 import transformers
 import wandb
 
 from transformers.utils import logging
 logger = logging.get_logger(__name__)
-
-#from loguru import logger
-
-
-# from peft_pretraining.modeling_llama import LlamaDecoderLayer
-#
-#
-# def initialize_fsdp(model, dtype):
-#     wrapping_policy = partial(
-#         transformer_auto_wrap_policy,
-#         transformer_layer_cls={
-#             LlamaDecoderLayer,
-#         },
-#     )
-#
-#     if dtype in ["bf16", "bfloat16"]:
-#         mixed_precision_policy = MixedPrecision(
-#             param_dtype=torch.bfloat16,
-#             reduce_dtype=torch.bfloat16,  # Gradient communication precision
-#             buffer_dtype=torch.bfloat16,  # Buffer precision
-#         )
-#     elif dtype == "float32":
-#         mixed_precision_policy = MixedPrecision(
-#             param_dtype=torch.float32,
-#             reduce_dtype=torch.float32,  # Gradient communication precision
-#             buffer_dtype=torch.float32,  # Buffer precision
-#         )
-#     else:
-#         raise ValueError(f"Dtype {dtype} not supported (only float32 and bfloat16 are)")
-#
-#     model = FSDP(
-#         model,
-#         mixed_precision=mixed_precision_policy,
-#         auto_wrap_policy=wrapping_policy,
-#     )
-#     return model
-
 
 def get_scheculer(
     optimizer,
@@ -419,3 +384,180 @@ def delete_old_checkpoints(save_dir, keep):
         checkpoint_path = os.path.join(save_dir, checkpoint)
         logger.info(f"Deleting checkpoint {checkpoint_path}")
         os.system(f"rm -rf {checkpoint_path}")
+
+
+
+## METAMATH
+def _make_r_io_base(f, mode: str):
+    if not isinstance(f, io.IOBase):
+        f = open(f, mode=mode)
+    return f
+
+def jload(f, mode="r"):
+    """Load a .json file into a dictionary."""
+    f = _make_r_io_base(f, mode)
+    jdict = json.load(f)
+    f.close()
+    return jdict
+
+
+IGNORE_INDEX = -100
+DEFAULT_PAD_TOKEN = "[PAD]"
+DEFAULT_EOS_TOKEN = "</s>"
+DEFAULT_BOS_TOKEN = "<s>"
+DEFAULT_UNK_TOKEN = "<unk>"
+PROMPT_DICT = {
+    "prompt_input": (
+        "Below is an instruction that describes a task, paired with an input that provides further context. "
+        "Write a response that appropriately completes the request.\n\n"
+        "### Instruction:\n{instruction}\n\n### Input:\n{input}\n\n### Response:"
+    ),
+    "prompt_no_input": (
+    "Below is an instruction that describes a task. "
+    "Write a response that appropriately completes the request.\n\n"
+    "### Instruction:\n{instruction}\n\n### Response:"
+    ),
+}
+
+
+
+def _tokenize_fn(strings: Sequence[str], tokenizer: transformers.PreTrainedTokenizer) -> Dict:
+    """Tokenize a list of strings."""
+    tokenized_list = [
+        tokenizer(
+            text,
+            return_tensors="pt",
+            padding="longest",
+            max_length=tokenizer.model_max_length,
+            truncation=True,
+        )
+        for text in strings
+    ]
+    input_ids = labels = [tokenized.input_ids[0] for tokenized in tokenized_list]
+    input_ids_lens = labels_lens = [
+        tokenized.input_ids.ne(tokenizer.pad_token_id).sum().item() for tokenized in tokenized_list
+    ]
+    return dict(
+        input_ids=input_ids,
+        labels=labels,
+        input_ids_lens=input_ids_lens,
+        labels_lens=labels_lens,
+    )
+
+
+def preprocess(
+    sources: Sequence[str],
+    targets: Sequence[str],
+    tokenizer: transformers.PreTrainedTokenizer,
+) -> Dict:
+    """Preprocess the data by tokenizing."""
+    examples = [s + t for s, t in zip(sources, targets)]
+    examples_tokenized, sources_tokenized = [_tokenize_fn(strings, tokenizer) for strings in (examples, sources)]
+    input_ids = examples_tokenized["input_ids"]
+    labels = copy.deepcopy(input_ids)
+    for label, source_len in zip(labels, sources_tokenized["input_ids_lens"]):
+        label[:source_len] = IGNORE_INDEX
+    return dict(input_ids=input_ids, labels=labels)
+
+import random
+from torch.utils.data import Dataset
+class SupervisedDataset(Dataset):
+    """Dataset for supervised fine-tuning."""
+
+    def __init__(self, data_args, tokenizer: transformers.PreTrainedTokenizer):
+        super(SupervisedDataset, self).__init__()
+        logger.warning("Loading data...")
+        data_path = data_args.data_path
+        if data_path == 'meta-math/MetaMathQA':
+            from datasets import load_dataset
+            list_data_dict = load_dataset('meta-math/MetaMathQA')['train'].to_list()
+        else:
+            try:
+                data_path = data_path_map[data_path]
+            except:
+                data_path = data_path
+            try:
+                list_data_dict = jload(data_path)
+            except BaseException:
+                with open(data_path, 'r') as f:
+                    lines = f.readlines()
+                list_data_dict = [json.loads(line.strip()) for line in lines]
+
+        list_data_dict = random.sample(list_data_dict,  len(list_data_dict))
+        list_data_dict = list_data_dict[:data_args.data_length]
+
+        prompt_input, prompt_no_input = PROMPT_DICT["prompt_input"], PROMPT_DICT["prompt_no_input"]
+        # print(list_data_dict[0])
+        if 'instruction' in list_data_dict[0]:
+            pass
+        else:
+            def get_input(query):
+                if query.find('\n') == -1:
+                    return ''
+                return '\n'.join(query.split('\n')[1:])
+            list_data_dict = [{'instruction':data['query'].split('\n')[0], 'input':get_input(data['query']), 'output':data['response']} for data in list_data_dict]
+        # import ipdb; ipdb.set_trace()
+        sources = [
+            prompt_input.format_map(example) if example.get("input", "") != "" else prompt_no_input.format_map(example)
+            for example in list_data_dict
+        ]
+        targets = [f"{example['output']}{tokenizer.eos_token}" for example in list_data_dict]
+
+        self.sources = sources
+        self.targets = targets
+
+    def __len__(self):
+        return len(self.sources)
+
+    def naive__getitem__(self, i) -> Dict[str, torch.Tensor]:
+        return dict(input_ids=self.input_ids[i], labels=self.labels[i])
+
+    def __getitem__(self, i):
+        return dict(input_ids=self.sources[i], labels=self.targets[i])
+
+from dataclasses import dataclass, field
+@dataclass
+class DataCollatorForSupervisedDataset(object):
+    """Collate examples for supervised fine-tuning."""
+
+    tokenizer: transformers.PreTrainedTokenizer
+
+    def naive__call__(self, instances: Sequence[Dict]) -> Dict[str, torch.Tensor]:
+        input_ids, labels = tuple([instance[key] for instance in instances] for key in ("input_ids", "labels"))
+        input_ids = torch.nn.utils.rnn.pad_sequence(
+            input_ids, batch_first=True, padding_value=self.tokenizer.pad_token_id
+        )
+        labels = torch.nn.utils.rnn.pad_sequence(labels, batch_first=True, padding_value=IGNORE_INDEX)
+        return dict(
+            input_ids=input_ids,
+            labels=labels,
+            attention_mask=input_ids.ne(self.tokenizer.pad_token_id).long(),
+        )
+
+    def __call__(self, instances: Sequence[Dict]) -> Dict[str, torch.Tensor]:
+        sources = []
+        targets = []
+        for instance in instances:
+            source = instance['input_ids']
+            target = instance['labels']
+            sources.append(source)
+            targets.append(target)
+
+        data_dict = preprocess(sources, targets, self.tokenizer)
+        input_ids, labels = data_dict['input_ids'], data_dict['labels']
+        # input_ids, labels = tuple([instance[key] for instance in instances] for key in ("input_ids", "labels"))
+        input_ids = torch.nn.utils.rnn.pad_sequence(
+            input_ids, batch_first=True, padding_value=self.tokenizer.pad_token_id
+        )
+        labels = torch.nn.utils.rnn.pad_sequence(labels, batch_first=True, padding_value=IGNORE_INDEX)
+        return dict(
+            input_ids=input_ids,
+            labels=labels,
+            attention_mask=input_ids.ne(self.tokenizer.pad_token_id).long(),
+        )
+
+def make_supervised_data_module(tokenizer: transformers.PreTrainedTokenizer, data_args) -> Dict:
+    """Make dataset and collator for supervised fine-tuning."""
+    train_dataset = SupervisedDataset(tokenizer=tokenizer, data_args=data_args)
+    data_collator = DataCollatorForSupervisedDataset(tokenizer=tokenizer)
+    return dict(train_dataset=train_dataset, eval_dataset=None, data_collator=data_collator)
