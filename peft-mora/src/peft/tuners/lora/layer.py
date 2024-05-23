@@ -109,6 +109,10 @@ class LoraLayer(BaseTunerLayer):
 
         if use_mora:
             new_r = int(math.sqrt((self.in_features + self.out_features)*r)+0.5)
+            if mora_type == 6:
+                # type 6 require new_r to be even for RoPE
+                new_r = new_r//2*2
+                            
             self.lora_A[adapter_name] = nn.Linear(new_r, new_r, bias=False)
             self.r[adapter_name] = new_r
 
