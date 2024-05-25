@@ -14,7 +14,7 @@ from peft import LoraConfig, get_peft_model
 config = LoraConfig(
     use_mora=True, # enable mora
     mora_type=1, # type 1 refer to Eq. 6, type 6 (RoPE based) for small ranks refer to Eq. 9 in paper.
-    r=lora_r, # lora rank here, we will calcuate corresponding $\hat{r}$ in MoRA
+    r=lora_r, # lora rank here, we will calculate corresponding $\hat{r}$ in MoRA
     target_modules=lora_target_modules,
     lora_dropout=lora_dropout,
     task_type="CAUSAL_LM",
