@@ -12,9 +12,15 @@ After installation, it can be used like
 ``` python
 from peft import LoraConfig, get_peft_model
 config = LoraConfig(
-    use_mora=True, # enable mora
-    mora_type=1, # type 1 refer to Eq. 6, type 6 (RoPE based) for small ranks refer to Eq. 9 in paper.
-    r=lora_r, # lora rank here, we will calculate corresponding $\hat{r}$ in MoRA
+    # enable MoRA
+    use_mora=True,
+    # type 1 (Sharing) for large lora ranks, Eq. 6 in paper
+    # type 6 (RoPE based) for small lora ranks, Eq. 9 in paper
+    mora_type=6,
+    # lora rank here, we will calculate corresponding $\hat{r}$ in MoRA
+    r=lora_r,
+    # MoRA does not use lora_alpha
+    # lora_alpha=lora_alpha,
     target_modules=lora_target_modules,
     lora_dropout=lora_dropout,
     task_type="CAUSAL_LM",
@@ -24,7 +30,8 @@ model = get_peft_model(model, config)
 
 # training here...
 
-model = model.merge_and_unload() # can be merged into model via `merge_and_unload` like LoRA
+# can be merged into model via `merge_and_unload` like LoRA
+model = model.merge_and_unload() 
 ```
 
 ## Examples
